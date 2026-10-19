@@ -1,6 +1,6 @@
 # QUAS
 
-QUAS (QUantitative ASessment) is the common starting point for your BTh. It provides a point mass model (rigid body) of a generic spacecraft (no atmosphere, quaternion based attitude).
+QUAS (QUantitative ASsessment) is the common starting point for your BTh. It provides a point mass model (rigid body) of a generic spacecraft (no atmosphere, quaternion based attitude).
 
 ## Features
 
