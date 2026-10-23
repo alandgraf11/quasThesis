@@ -1,3 +1,5 @@
 __pycache__/
 .vscode/
-results/
+results/*
+!results/.gitkeep
+!results/inspect_npz.py
