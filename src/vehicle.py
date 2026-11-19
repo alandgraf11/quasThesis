@@ -1,111 +1,74 @@
+import numpy as np
 import casadi as ca
+from src.actuators import build_B
 
-class Vehicle():
+
+class vehicle():
     def __init__(self, config, g=1.62):
-        self.mass = config['vehicle']['mass']
-        self.Ix = config['vehicle']['Ix']
-        self.Iy = config['vehicle']['Iy']
-        self.Iz = config['vehicle']['Iz']
-        self.g = g
+        # pick mass and inertia snapshot from config (for stage 1 const per run)
+        name = config['vehicle']['snapshot']
+        snap = config['vehicle']['snapshots'][name]
+
+        self.mass = snap['mass']          # kg
+        self.J = np.diag([snap['Ix'], snap['Iy'], snap['Iz']])   # inertia matrix in body frame, kg m^2
+        self.l_v = snap['l_v']                # m, distance from CoG to engine plane
+        self.g = g                        # m/s^2, gravity acceleration
+
+        # B from stap 1a: tau = B @ u 
+        self.B = build_B(config['propulsion'], self.l_v)  # 6 x 5 matrix, body frame
+        self.n_u = self.B.shape[1]  # number of control inputs (5)
+        self.n_states = 13 + self.n_u  # number of states (13 + n_u = 18)
 
         self.ca_model()
 
-    def ca_model(self): # dynamics of the vehicle build based upon casadi symbolic variables;
-                        # can be used for numerical simulation and solving the OCP
+    def hover_throttle(self):
+        # equal throttle for both engines to hover (no RCS)
+        F_z_both = float(self.B[2,0] + self.B[2,1]) # total thrust in body z direction
+        return self.mass * self.g / F_z_both  # throttle to hover (0..1)
 
-        # states
-        pos_W = ca.SX.sym('pos_W', 3, 1)            # world frame
-        vel_W = ca.SX.sym('vel_W', 3, 1)            # world frame
-        quat_B = ca.SX.sym('quat_B', 4, 1)          # body frame
-        ang_vel_B = ca.SX.sym('ang_vel_B', 3, 1)    # body frame
-        F_body = ca.SX.sym('F_body', 3, 1)          # Forces from the propulsion system are modelled as states (body frame)
-        tau_body = ca.SX.sym('M_body', 3, 1)        # Torques from the propulsion system are modelled as states (body frame)
-    
-        x = pos_W[0]
-        y = pos_W[1]
-        z = pos_W[2]
+    def ca_model(self):
+        # ------------ states --------------
+        p = ca.SX.sym('p', 3) # pos of CoG in world frame 
+        v = ca.SX.sym('v', 3) # vel of CoG in world frame
+        q = ca.SX.sym('q', 4) # quaternion of body frame in world frame
+        w = ca.SX.sym('w', 3) # angular vel of body frame
 
-        u = vel_W[0]
-        v = vel_W[1]
-        w = vel_W[2]
+        # ------------ controls --------------
+        u = ca.SX.sym('u', self.n_u) # control inputs (2 engine throttles + 3 RCS moments)
 
-        qw = quat_B[0]
-        qx = quat_B[1]
-        qy = quat_B[2]
-        qz = quat_B[3]
+        # ----------- forces and moments -----------
+        tau = self.B @ u  # tau = B @ u, in body frame
+        F_body = tau[0:3]  # force in body frame
+        M_body = tau[3:6]  # moment in body frame
 
-        p = ang_vel_B[0]
-        q = ang_vel_B[1]
-        r = ang_vel_B[2]
-
-        Fx = F_body[0]
-        Fy = F_body[1]
-        Fz = F_body[2]
-
-        taux = tau_body[0]
-        tauy = tau_body[1]
-        tauz = tau_body[2]
-
-        # controls
-        ctrl = ca.SX.sym('ctrl', 6, 1)
-
-        # rate of change of the forces
-        dFx = ctrl[0]
-        dFy = ctrl[1]
-        dFz = ctrl[2]
-        
-        # rate of change of the torques
-        dtaux = ctrl[3]
-        dtauy = ctrl[4]
-        dtauz = ctrl[5]
-
-        # rotation matrix from body to world frame; takes quaternions as inputs
+        # rotation matrix body -> world frame
+        qw, qx, qy, qz = q[0], q[1], q[2], q[3]
         R = ca.vertcat(
-            ca.horzcat(1 - 2*(qy**2 + qz**2), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)),
-            ca.horzcat(2*(qx*qy + qw*qz), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qw*qx)),
-            ca.horzcat(2*(qx*qz - qw*qy), 2*(qy*qz + qw*qx), 1 - 2*(qx**2 + qy**2)),
+            ca.horzcat(1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw),
+            ca.horzcat(2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw),
+            ca.horzcat(2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2)
         )
 
-        F_world = R @ F_body
+        # ----------- ODEs -----------
+        g_W = ca.vertcat(0, 0, -self.g)
 
-        # ODEs: translation in world frame, rotation in body frame
-        xdot, ydot, zdot = u, v, w
-        udot = F_world[0]/self.mass
-        vdot = F_world[1]/self.mass
-        wdot = F_world[2]/self.mass - self.g
+        p_dot = v
+        v_dot = g_W + R @ F_body / self.mass
 
-        qwdot = -0.5*(qx*p + qy*q + qz*r)
-        qxdot =  0.5*(qw*p + qy*r  - qz*q)
-        qydot =  0.5*(qw*q + qz*p  - qx*r)
-        qzdot =  0.5*(qw*r + qx*q - qy*p)
+        wx, wy, wz = w[0], w[1], w[2]
+        q_dot = 0.5 * ca.vertcat(
+            -qx*wx - qy*wy - qz*wz,
+            qw*wx + qy*wz - qz*wy,
+            qw*wy + qz*wx - qx*wz,
+            qw*wz + qx*wy - qy*wx
+        )
 
-        pdot = (self.Iy-self.Iz)/self.Ix*q*r + taux/self.Ix
-        qodot= (self.Iz-self.Ix)/self.Iy*r*p  + tauy/self.Iy
-        rdot = (self.Ix-self.Iy)/self.Iz*p*q + tauz/self.Iz
+        J = ca.DM(self.J)
+        w_dot = ca.solve(J, M_body - ca.cross(w, J @ w)) # J w_dot = M - wx (J w) 
 
-        pos_dot = ca.vertcat(xdot, ydot, zdot)
-        vel_dot = ca.vertcat(udot, vdot, wdot)
-        quat_dot = ca.vertcat(qwdot, qxdot, qydot, qzdot)
-        ang_vel_dot = ca.vertcat(pdot, qodot, rdot)
+        # ----------- collect -----------
+        s = ca.vertcat(p, v, q, w, u)  # state vector
+        rhs = ca.vertcat(p_dot, v_dot, q_dot, w_dot, u_dot) # u is integrated from u_dot
 
-        # ODEs of the control inputs
-        Fx_dot = dFx
-        Fy_dot = dFy
-        Fz_dot = dFz
-
-        taux_dot = dtaux
-        tauy_dot = dtauy
-        tauz_dot = dtauz
-
-        ctrls_dot = ca.vertcat(Fx_dot, Fy_dot, Fz_dot, taux_dot, tauy_dot, tauz_dot)
-
-        # collecting all state derivatives in one vector
-        rhs = ca.vertcat(pos_dot, vel_dot, quat_dot, ang_vel_dot, ctrls_dot)
-
-        # state vector
-        s = ca.vertcat(x, y, z, u, v, w,
-                        qw, qx, qy, qz, p, q, r,
-                        Fx, Fy, Fz, taux, tauy, tauz)
-        
-        # continous dynamics as casadi function
-        self.f = ca.Function("f", [s, ctrl], [rhs])
+        self.f = ca.Function('f', [s, u_dot], [rhs]) # dynamics: s_dot = f(s, u_dot)
+        self.tau_func = ca.Function('tau', [s], [tau]) # forces / moments for a given state s'

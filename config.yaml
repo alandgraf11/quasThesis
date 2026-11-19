@@ -1,8 +1,28 @@
 vehicle:
-  mass: 1   # Mass [kg]
-  Ix: 1     # Moment of inertia about x-axis [kg*m^2]
-  Iy: 1     # Moment of inertia about y-axis [kg*m^2]
-  Iz: 1     # Moment of inertia about z-axis [kg*m^2]
+  snapshot: burn_start   # which snapshot is used (stage 1: m, J, l_v constant per run)
+  snapshots:
+    burn_start:
+      mass: 15455        # [kg]
+      Ix: 35311          # [kg m^2] (sheet Iyy)
+      Iy: 35212          # [kg m^2] (sheet Izz)
+      Iz: 32397          # [kg m^2] (sheet Ixx)
+      l_v: 0.81          # engine pivot below CoG [m]
+    touchdown:
+      mass: 7162
+      Ix: 17519
+      Iy: 20965
+      Iz: 16804
+      l_v: 1.57
+
+propulsion:
+  T_max: 22000        # thrust per main engine [N]
+  delta_min: 0.13     # minimum throttle (2.85/22)
+  beta_deg: 71.81     # cant angle (sin beta = 0.95)
+  l_l: 0.65           # lateral engine offset [m] l_v in snapshots as it changes with mass depletion
+  rcs:
+    F: 445            # per thruster [N]
+    n_per_axis: 4
+    lever: [1.679, 1.679, 1.562]   # x, y, z [m]
 
 simulation: 
   time_step: 0.01   # Time step size [s]
