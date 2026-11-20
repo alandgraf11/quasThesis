@@ -229,14 +229,15 @@ def animate_hopper(
     dt,
     trail=True,
     show_body_axes=True,
+    scale=4.0,
 ):
     """
-    Animate a 19-state rocket trajectory in real time.
+    Animate a lander trajectory in real time (state layout: p, v, q, w, u).
 
     Parameters
     ----------
     states : ndarray
-        Shape (N, 19) or (N, 19, 1).
+        Shape (N, n_states) or (N, n_states, 1); only p (0:3) and q (6:10) are used.
 
     dt : float
         Time between consecutive state samples, in seconds.
@@ -246,6 +247,9 @@ def animate_hopper(
 
     show_body_axes : bool
         Show body-fixed coordinate axes.
+
+    scale : float
+        Size factor for the drawn vehicle (1.0 -> about 1.5 m tall; 4.0 -> lander size).
 
     Returns
     -------
@@ -259,9 +263,9 @@ def animate_hopper(
     if states.ndim == 3 and states.shape[-1] == 1:
         states = states[:, :, 0]
 
-    if states.ndim != 2 or states.shape[1] < 19:
+    if states.ndim != 2 or states.shape[1] < 13:
         raise ValueError(
-            f"Expected states with shape (N, 19) or (N, 19, 1), "
+            f"Expected states with shape (N, >=13) or (N, >=13, 1), "
             f"got {states.shape}"
         )
 
@@ -271,7 +275,7 @@ def animate_hopper(
     if not np.isfinite(dt) or dt <= 0:
         raise ValueError("dt must be a finite, positive number.")
 
-    if not np.all(np.isfinite(states[:, :19])):
+    if not np.all(np.isfinite(states[:, :13])):
         raise ValueError("States contain NaN or infinite values.")
 
     # State timestamps: t = 0, dt, 2*dt, ...
@@ -283,6 +287,7 @@ def animate_hopper(
     # --------------------------------------------------------------
 
     vertices_body, faces = create_hopper_geometry()
+    vertices_body = vertices_body * scale
 
     # --------------------------------------------------------------
     # Figure
@@ -291,13 +296,13 @@ def animate_hopper(
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
 
-    ax.set_title("Hopper Simulation")
+    ax.set_title("Lander")
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
     ax.set_zlabel("Z [m]")
 
     # Keep the camera limits fixed for the whole animation.
-    rocket_size = 1.8
+    rocket_size = 1.8 * scale
 
     mins = positions.min(axis=0) - rocket_size / 2
     maxs = positions.max(axis=0) + rocket_size / 2
@@ -379,7 +384,7 @@ def animate_hopper(
 
         # Update body coordinate axes.
         if show_body_axes:
-            axis_length = 0.85
+            axis_length = 0.85 * scale
 
             for i, axis_line in enumerate(body_axes):
                 endpoint = position + R[:, i] * axis_length
@@ -439,17 +444,20 @@ def animate_hopper(
     return fig, animation
 
 
-def visualize_3d(states, dt, trail=True, show_body_axes=True):
+def visualize_3d(states, dt, trail=True, show_body_axes=True, scale=4.0):
     """
     Display the rocket animation in real time.
 
     Parameters
     ----------
     states : ndarray
-        Shape (N, 19) or (N, 19, 1).
+        Shape (N, n_states) or (N, n_states, 1).
 
     dt : float
         Time step between consecutive states, in seconds.
+
+    scale : float
+        Size factor for the drawn vehicle.
     """
 
     fig, animation = animate_hopper(
@@ -457,6 +465,7 @@ def visualize_3d(states, dt, trail=True, show_body_axes=True):
         dt=dt,
         trail=trail,
         show_body_axes=show_body_axes,
+        scale=scale,
     )
 
     plt.show()

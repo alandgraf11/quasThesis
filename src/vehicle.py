@@ -1,9 +1,10 @@
 import numpy as np
 import casadi as ca
 from src.actuators import build_B
+from utils.quaternion import euler_to_q
 
 
-class vehicle():
+class Vehicle():
     def __init__(self, config, g=1.62):
         # pick mass and inertia snapshot from config (for stage 1 const per run)
         name = config['vehicle']['snapshot']
@@ -19,12 +20,31 @@ class vehicle():
         self.n_u = self.B.shape[1]  # number of control inputs (5)
         self.n_states = 13 + self.n_u  # number of states (13 + n_u = 18)
 
+        # allowed actuator range U and rate limits (stage 1: boxes)
+        prop = config['propulsion']
+        d_min = prop['delta_min']
+        rate = prop['rate_max']
+        self.u_lb = np.array([d_min, d_min, -1, -1, -1])   # lower bounds of u
+        self.u_ub = np.array([1, 1, 1, 1, 1])               # upper bounds of u
+        self.u_dot_max = np.array([rate['engine'], rate['engine'], rate['rcs'], rate['rcs'], rate['rcs']])
+
         self.ca_model()
 
     def hover_throttle(self):
         # equal throttle for both engines to hover (no RCS)
         F_z_both = float(self.B[2,0] + self.B[2,1]) # total thrust in body z direction
         return self.mass * self.g / F_z_both  # throttle to hover (0..1)
+
+    def make_state(self, rigid, u=None):
+        # builds the full 18-state vector from the 12 rigid-body values in config.yaml:
+        # rigid = [x, y, z, vx, vy, vz, phi, theta, psi (deg), wx, wy, wz]
+        # u = actuators; default: both engines at hover throttle, thrusters off
+        rigid = np.asarray(rigid, dtype=float)
+        q = euler_to_q(np.deg2rad(rigid[6:9]))      # euler angles -> quaternion
+        if u is None:
+            d_h = self.hover_throttle()
+            u = [d_h, d_h, 0, 0, 0]
+        return np.concatenate([rigid[0:6], q, rigid[9:12], u])
 
     def ca_model(self):
         # ------------ states --------------
@@ -35,9 +55,14 @@ class vehicle():
 
         # ------------ controls --------------
         u = ca.SX.sym('u', self.n_u) # control inputs (2 engine throttles + 3 RCS moments)
+        u_dot = ca.SX.sym('u_dot', self.n_u) # rate of change of the actuators
 
         # ----------- forces and moments -----------
-        tau = self.B @ u  # tau = B @ u, in body frame
+                # ----------- fault parameters (stage 1d) -----------
+        lam = ca.SX.sym('lam', self.n_u)   # effectiveness of each actuator: 1 = healthy, 0 = out
+        b_f = ca.SX.sym('b_f', 6)          # constant extra force/moment (stuck actuator)
+
+        tau = self.B @ (lam * u) + b_f     # tau = B Lambda_f u + b_f, in body frame
         F_body = tau[0:3]  # force in body frame
         M_body = tau[3:6]  # moment in body frame
 
@@ -70,5 +95,12 @@ class vehicle():
         s = ca.vertcat(p, v, q, w, u)  # state vector
         rhs = ca.vertcat(p_dot, v_dot, q_dot, w_dot, u_dot) # u is integrated from u_dot
 
-        self.f = ca.Function('f', [s, u_dot], [rhs]) # dynamics: s_dot = f(s, u_dot)
-        self.tau_func = ca.Function('tau', [s], [tau]) # forces / moments for a given state s'
+        # dynamics and forces/moments WITH a fault (lam, b_f are extra inputs)
+        self.f_fault = ca.Function('f_fault', [s, u_dot, lam, b_f], [rhs])
+        self.tau_fault = ca.Function('tau_fault', [s, lam, b_f], [tau])
+
+        # nominal versions (no fault: lam = 1, b_f = 0) -> same as before
+        ones = ca.DM.ones(self.n_u)
+        zeros = ca.DM.zeros(6)
+        self.f = ca.Function('f', [s, u_dot], [self.f_fault(s, u_dot, ones, zeros)])
+        self.tau_func = ca.Function('tau', [s], [self.tau_fault(s, ones, zeros)])

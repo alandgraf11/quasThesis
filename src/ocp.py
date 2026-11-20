@@ -2,12 +2,13 @@ import time
 import numpy as np
 import casadi as ca
 from utils.integrator import rk4_step_ca
+from src.faults import make_fault
 
 class OCP_tracking(): # implements a finite horizon OCP with least squares cost (hence tracking)
-    def __init__(self, config, dynamics):
+    def __init__(self, config, vehicle):
         self.config = config
-        self.dynamics = dynamics   # self.f (rhs as a casadi function) from vehicle.ca_model
-
+        self.vehicle = vehicle
+        self.dynamics = vehicle.f   # rhs as a casadi function from vehicle.ca_model
         self.init_solver()
 
     def init_solver(self, print_level=0):
@@ -25,7 +26,11 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
         s = ca.SX.sym('s', n_states, 1)
         ctrl = ca.SX.sym('u', n_controls, 1)
         s0 = ca.SX.sym('s0', n_states)
-        F = ca.Function('F', [s, ctrl], [rk4_step_ca(self.dynamics, s, ctrl, dt)])
+                # fault parameters: they enter the OCP as parameters -> no solver rebuild per fault
+        lam = ca.SX.sym('lam', n_controls)
+        b_f = ca.SX.sym('b_f', 6)
+        f_fault = lambda x, u: self.vehicle.f_fault(x, u, lam, b_f)
+        F = ca.Function('F', [s, ctrl, lam, b_f], [rk4_step_ca(f_fault, s, ctrl, dt)])
 
         # defining the cost (least squares)
         S = ca.SX.sym('S', n_states, N+1)
@@ -46,19 +51,22 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
         for ii in range(N):
             g.append(S[6:10, ii+1].T @ S[6:10, ii+1] - 1)
 
-            dyn_constraint = S[:, ii+1] - F(S[:, ii], U[:, ii])
+            dyn_constraint = S[:, ii+1] - F(S[:, ii], U[:, ii], lam, b_f)
             g.append(dyn_constraint)
 
+                # terminal constraint: position and velocity of the goal are reached exactly
+        g.append(S[0:6, N] - S_goal[0:6, N])
         g = ca.vertcat(*g)
         lbg = ubg = np.zeros(g.shape[0])      
 
         # constraints on decision variables (states and controls) -> lbx and ubx
         s_lb = np.full(n_states, -np.inf)
         s_ub = np.full(n_states, np.inf)
-        s_lb[13:] = np.concatenate([self.config['ocp']['F_cst_low'], self.config['ocp']['tau_cst_low']])
-        s_ub[13:] = np.concatenate([self.config['ocp']['F_cst_high'], self.config['ocp']['tau_cst_high']])
-        u_lb = - np.concatenate([self.config['ocp']['dF_cst'], self.config['ocp']['dtau_cst']])
-        u_ub = np.concatenate([self.config['ocp']['dF_cst'], self.config['ocp']['dtau_cst']])
+        s_lb[2] = 0.0                      # ground: z >= 0
+        s_lb[13:] = self.vehicle.u_lb      # actuators stay inside U
+        s_ub[13:] = self.vehicle.u_ub
+        u_lb = -self.vehicle.u_dot_max     # rate limits on the input u_dot
+        u_ub = self.vehicle.u_dot_max       
         lbx = np.concatenate([np.tile(s_lb, N+1), np.tile(u_lb, N)])
         ubx = np.concatenate([np.tile(s_ub, N+1), np.tile(u_ub, N)])
 
@@ -70,7 +78,7 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
         # vector of parameters
         # benefit of specifying them as parameters: solver does not need to be
         # instantiated every time that new parameters are specified
-        p = ca.vertcat(s0, ca.vec(S_goal))
+        p = ca.vertcat(s0, ca.vec(S_goal), lam, b_f)
 
         # setting up the nlp
         nlp = {'x': x,          # decision variables
@@ -80,7 +88,7 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
 
         opts = {                # solver options
             'ipopt.print_level': print_level, # print_level=0 -> minimal; print_level=5 -> maximal
-            # 'print_time': False,
+            'print_time': False,
             # 'error_on_fail': False,
         }
 
@@ -96,7 +104,8 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
         self.lbg = lbg
         self.ubg = ubg
 
-    def solve(self, s0, s_goal, x_init=None): # solving the OCP
+    def solve(self, s0, s_goal, fault=None, x_init=None): # solving the OCP
+        # faul: dict from src.faults.make_fault; None -> nominal
         # this function is vibe coded; don't worry too much about it, it's mostly ensuring
         # that arrays have the right dimension
         s0 = np.asarray(s0, dtype=float).ravel()
@@ -106,18 +115,25 @@ class OCP_tracking(): # implements a finite horizon OCP with least squares cost 
         assert s0.shape == (self.n_states,)
         assert s_goal.shape == (self.N + 1, self.n_states)
 
-        # row-major ravel of (N+1, n_states) == ca.vec(S_goal) (node after node)
-        p = np.concatenate([s0, s_goal.ravel()])
+        if fault is None:
+            fault = make_fault(self.vehicle)            # nominal
+        p = np.concatenate([s0, s_goal.ravel(), fault['lam'], fault['b_f']])
+
+        # rate limits of this fault (a slow actuator only changes these bounds)
+        n_S = self.n_states * (self.N + 1)
+        lbx = self.lbx.copy()
+        ubx = self.ubx.copy()
+        lbx[n_S:] = np.tile(-fault['u_dot_max'], self.N)
+        ubx[n_S:] = np.tile(fault['u_dot_max'], self.N)
 
         if x_init is None:
-            s_guess = np.zeros(self.n_states)
-            s_guess[6] = 1.0                           # qw = 1 -> upright, valid quaternion
-            x_init = np.concatenate([np.tile(s_guess, self.N + 1),
+            # initial guess: the lander stays at s0 for the whole horizon, u_dot = 0
+            x_init = np.concatenate([np.tile(s0, self.N + 1),
                                     np.zeros(self.n_controls * self.N)])
-
+        
         t0 = time.perf_counter()
         sol = self.solver(x0=x_init, p=p,               # solving the OCP with the provided intial state and parameters
-                        lbx=self.lbx, ubx=self.ubx,
+                        lbx=lbx, ubx=ubx,
                         lbg=self.lbg, ubg=self.ubg)
         self.t_solve = time.perf_counter() - t0
         return sol

@@ -16,11 +16,8 @@ def init_worker(config):
     """Initialize one independent OCP solver in each worker."""
     global _worker_ocp
 
-    vehicle = Vehicle(config=config)
-    vehicle.ca_model()
-
-    ocp = OCP_tracking(config=config, dynamics=vehicle.f)
-    ocp.init_solver()
+    vehicle = Vehicle(config=config)      # builds the dynamics (ca_model) itself
+    ocp = OCP_tracking(config=config, vehicle=vehicle)   # builds the solver itself
 
     _worker_ocp = ocp
 
@@ -185,14 +182,13 @@ if __name__ == "__main__":
     n_workers = config['batch']['num_cpus']
     N = config['batch']['N_cases']
 
-    # sample random initial and target states
+    # sample random start positions; goal = target_state from config (landing site, at rest)
+    # PLACEHOLDER until the Monte Carlo design (fault cases, LHS, ...) replaces this sampling
+    vehicle = Vehicle(config=config)      # only used to build full state vectors here
     rng = np.random.default_rng(42)
 
-    start_lower_bounds = np.array([-2, -2, 0])
-    start_upper_bounds = np.array([2, 2, 1])
-
-    goal_lower_bounds = np.array([-3, -3, 0])
-    goal_upper_bounds = np.array([3, 3, 5])
+    start_lower_bounds = np.array([-5, -5, 40])     # x, y, z [m]
+    start_upper_bounds = np.array([5, 5, 60])
 
     start_conditions = rng.uniform(
         start_lower_bounds,
@@ -200,20 +196,14 @@ if __name__ == "__main__":
         size=(N, 3),
     )
 
-    goal_conditions = rng.uniform(
-        goal_lower_bounds,
-        goal_upper_bounds,
-        size=(N, 3),
-    )
+    rigid0 = np.zeros(12)                           # at rest, upright
+    s0_array = np.zeros((N, vehicle.n_states))
+    for i in range(N):
+        rigid0[0:3] = start_conditions[i]
+        s0_array[i] = vehicle.make_state(rigid0)    # actuators at hover throttle
 
-    s0_array = np.zeros((N, 19))
-    s_goal_array = np.zeros((N, 19))
-
-    s0_array[:, 6] = 1.0
-    s_goal_array[:, 6] = 1.0
-
-    s0_array[:, 0:3] = start_conditions
-    s_goal_array[:, 0:3] = goal_conditions
+    s_goal = vehicle.make_state(config['simulation']['target_state'])
+    s_goal_array = np.tile(s_goal, (N, 1))
 
     # Package each independent problem into a task.
     tasks = [

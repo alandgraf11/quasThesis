@@ -1,5 +1,5 @@
 vehicle:
-  snapshot: burn_start   # which snapshot is used (stage 1: m, J, l_v constant per run)
+  snapshot: touchdown   # which snapshot is used (stage 1: m, J, l_v constant per run)
   snapshots:
     burn_start:
       mass: 15455        # [kg]
@@ -17,6 +17,9 @@ vehicle:
 propulsion:
   T_max: 22000        # thrust per main engine [N]
   delta_min: 0.13     # minimum throttle (2.85/22)
+  rate_max:
+    engine: 0.87      # max throttle change [1/s] (min -> max in about 1 s)
+    rcs: 20           # [1/s] practically instant (-1 -> +1 within one OCP step)
   beta_deg: 71.81     # cant angle (sin beta = 0.95)
   l_l: 0.65           # lateral engine offset [m] l_v in snapshots as it changes with mass depletion
   rcs:
@@ -26,28 +29,34 @@ propulsion:
 
 simulation: 
   time_step: 0.01   # Time step size [s]
-  duration: 5     # Total simulation duration [s]
-  # state convention
-  # [x, y, z, u, v, w, phi, theta, psi, p, q, r, Fx, Fy, Fz, taux, tauy, tauz]
-  # angles are specified as euler angles (degrees) instead of quaternions (more intuitive)
-  initial_state: [0, 0, 1,  0, 0, 0,  0, 0, 0,  0, 0, 0,  0, 0, 0.1,  0, 0, 0] # Initial state vector
-  target_state: [1, 2, 3,  0, 0, 0,  0, 0, 0,  0, 0, 0,  0, 0, 0,  0, 0, 0] # Target state vector
+  duration: 10      # Total simulation duration [s] (main_sim.py)
+  # rigid-body part of the state, 12 values:
+  # [x, y, z,  vx, vy, vz,  phi, theta, psi,  wx, wy, wz]
+  # positions [m], velocities [m/s] (world), euler angles [deg], rotation rates [rad/s] (body)
+  # the actuators u are added in the code: both engines at hover throttle, thrusters off
+  initial_state: [0, 0, 50,  0, 0, 0,  0, 0, 0,  0, 0, 0]   # start (main_sim.py, main_ocp.py)
+  target_state:  [0, 0, 0,   0, 0, 0,  0, 0, 0,  0, 0, 0]   # goal (main_ocp.py)
+  # main_sim.py only: constant input u_dot = rates of [delta_1, delta_2, m_x, m_y, m_z] [1/s]
+  u_dot: [0, 0, 0, 0, 0]
+
+fault:              # used by main_ocp.py (the OCP knows the fault)
+  kind: out        # none | weak | out | stuck | slow
+  actuator: 0       # 0 = delta_1, 1 = delta_2, 2 = m_x, 3 = m_y, 4 = m_z
+  value: null       # weak: remaining effectiveness, stuck: stuck value, slow: remaining rate fraction
 
 visualization:
   plot: true         # Whether to plot states over time
   animate: true       # Whether to animate the vehicle
   
 ocp:
-  horizon: 200         # finite horizon
-  time_step: 0.05     # time step size [s]
-  Q: [1.0, 1.0, 1.0,  0.1, 0.1, 0.1,  0.5, 0.5, 0.5, 0.5,  0.1, 0.1, 0.1,  1.0e-3, 1.0e-3, 1.0e-3,  1.0e-3, 1.0e-3, 1.0e-3] # State weights for the cost function; note: 1.0e-3 works, 1e-3 does NOT work
-  R: [0.1, 0.1, 0.1,  0.1, 0.1, 0.1]  # Control input weights for the cost function
-  F_cst_low: [-3, -3, 0] # Fx, Fy, Fz lower bound; body frame
-  F_cst_high: [3, 3, 20] # Fx, Fy, Fz upper bound; body frame
-  dF_cst: [6, 6, 20] # positive / negative Fx, Fy, Fz rate constraint; body frame
-  tau_cst_low: [-1, -1, -1] # taux, tauy, tauz lower bound; body frame
-  tau_cst_high: [1, 1, 1] # taux, tauy, tauz upper bound; body frame
-  dtau_cst: [1, 1, 1] # positive / negative taux, tauy, tauz rate constraint; body frame
+  horizon: 200        # number of time steps
+  time_step: 0.1      # time step size [s] -> horizon 20 s
+  # state weights, 18 values: p (3), v (3), q (4), w (3), u (5)
+  # write small numbers as 1.0e-3, not 1e-3 (PyYAML reads 1e-3 as text)
+  Q: [0.1, 0.1, 0.1,  1.0, 1.0, 1.0,  100.0, 100.0, 100.0, 100.0,  100.0, 100.0, 100.0,  0.0, 0.0, 0.0, 0.0, 0.0]
+  # input weights, 5 values: u_dot = (delta_1, delta_2, m_x, m_y, m_z) rates
+  R: [1.0, 1.0, 1.0, 1.0, 1.0]
+
 
 batch:
   num_cpus: 4     # number of CPUs for multiprocessing; check first how many your machine has and don't assign all of them; also more is not necessarily faster because of the coordination overhead

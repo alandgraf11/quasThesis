@@ -2,93 +2,61 @@ import numpy as np
 import matplotlib.pyplot as plt
 from utils.quaternion import q_to_euler
 
-def plot_results(time, states, controls, s_goal=None, title=None):
+
+def plot_results(time, states, controls, vehicle, s_goal=None, title=None, fault=None):
     """
-    Plot OCP or simulation results using a common interface.
+    Plot OCP or simulation results (state layout: p, v, q, w, u -> 18 states).
 
     OCP:
         time     : (N+1,)
-        states   : (N+1, 19)
-        controls : (N, 6)
+        states   : (N+1, 18)
+        controls : (N, 5)      u_dot at every OCP step
 
     Simulation:
         time     : (N,)
-        states   : (N, 19, 1) or (N, 19)
-        controls : (6,)
+        states   : (N, 18, 1) or (N, 18)
+        controls : (5,)        constant u_dot
+
+    vehicle:
+        Vehicle object; gives B (forces / moments), the actuator bounds and the rate limits.
 
     s_goal:
-        Optional reference state, shape (19,) or (N_states, 19).
+        Optional goal state, shape (18,) or (len(time), 18); drawn dashed for p, v, euler, w.
     """
 
     time = np.asarray(time, dtype=float).ravel()
     states = np.asarray(states, dtype=float)
     controls = np.asarray(controls, dtype=float)
 
-    # ------------------------------------------------------------
-    # Normalize states
-    # ------------------------------------------------------------
-
     if states.ndim == 3 and states.shape[-1] == 1:
         states = states.squeeze(axis=-1)
 
-    if states.ndim != 2 or states.shape[1] < 19:
-        raise ValueError(
-            f"Expected states with shape (N, >=19), got {states.shape}"
-        )
-
-    if len(time) != len(states):
-        raise ValueError(
-            f"Time length {len(time)} != number of state samples "
-            f"{len(states)}"
-        )
+    n_u = vehicle.n_u
+    if states.shape != (len(time), vehicle.n_states):
+        raise ValueError(f"Expected states with shape ({len(time)}, {vehicle.n_states}), "
+                         f"got {states.shape}")
 
     # ------------------------------------------------------------
-    # Identify mode and prepare control history
+    # inputs u_dot: one row per state sample (for step plots)
     # ------------------------------------------------------------
 
-    is_ocp = controls.ndim == 2
-
-    if is_ocp:
-        if controls.shape[1] != 6:
-            raise ValueError(
-                f"Expected OCP controls with shape (N, 6), "
-                f"got {controls.shape}"
-            )
-
-        if controls.shape[0] != len(states) - 1:
-            raise ValueError(
-                "OCP controls must have one row fewer than states"
-            )
-
-        if len(time) != controls.shape[0] + 1:
-            raise ValueError(
-                "OCP time must have one sample more than controls"
-            )
-
-        if controls.shape[0] == 0:
-            raise ValueError("OCP controls must contain at least one row")
-
-        # Repeat the final control to align with the state time array.
-        U_plot = np.vstack((controls, controls[-1]))
-
+    if controls.ndim == 2:                          # OCP: one u_dot per step
+        if controls.shape != (len(time) - 1, n_u):
+            raise ValueError(f"Expected OCP controls with shape ({len(time) - 1}, {n_u}), "
+                             f"got {controls.shape}")
+        U_dot = np.vstack((controls, controls[-1]))     # repeat last one to match the time axis
         if title is None:
             title = "OCP Solution"
-
-    else:
-        if controls.shape != (6,):
-            raise ValueError(
-                f"Expected simulation controls with shape (6,), "
-                f"got {controls.shape}"
-            )
-
-        # Constant controls throughout the simulation.
-        U_plot = np.tile(controls, (len(time), 1))
-
+    else:                                           # simulation: constant u_dot
+        if controls.shape != (n_u,):
+            raise ValueError(f"Expected simulation controls with shape ({n_u},), "
+                             f"got {controls.shape}")
+        U_dot = np.tile(controls, (len(time), 1))
         if title is None:
             title = "Vehicle Simulation Results"
 
     # ------------------------------------------------------------
-    # Extract states
+    # split the states
     # ------------------------------------------------------------
 
     def unpack(S):
@@ -97,141 +65,113 @@ def plot_results(time, states, controls, s_goal=None, title=None):
             "vel": S[:, 3:6],
             "euler": np.rad2deg(q_to_euler(S[:, 6:10])),
             "omega": np.rad2deg(S[:, 10:13]),
-            "F": S[:, 13:16],
-            "tau": S[:, 16:19],
         }
 
     d = unpack(states)
+    u = states[:, 13:13 + n_u]                      # actuators: delta_1, delta_2, m_x, m_y, m_z
 
-    # ------------------------------------------------------------
-    # Optional reference trajectory
-    # ------------------------------------------------------------
+    # forces and moments from the actuators: tau = B (lam u) + b_f (body frame)
+    B = np.array(vehicle.B)
+    if fault is None:
+        tau = u @ B.T                               # (N, 6), no fault
+    else:
+        tau = (u * fault['lam']) @ B.T + fault['b_f']
+    F_body = tau[:, 0:3] / 1e3                      # kN
+    M_body = tau[:, 3:6] / 1e3                      # kNm
+
+    # what the actuators really produce (fault included); u itself is only the command
+    u_eff = u.copy()
+    if fault is not None:
+        u_eff = u * fault['lam']                    # weak: scaled, out: 0
+        if fault['kind'] == 'stuck':
+            u_eff[:, fault['actuator']] = fault['value']   # stuck: constant, whatever the command
 
     g = None
-
     if s_goal is not None:
         s_goal = np.asarray(s_goal, dtype=float)
-
         if s_goal.ndim == 1:
-            if s_goal.size < 19:
-                raise ValueError("s_goal must contain at least 19 states")
             s_goal = np.tile(s_goal, (len(time), 1))
-
-        if s_goal.ndim != 2 or s_goal.shape[1] < 19:
-            raise ValueError(
-                f"Expected s_goal with shape (19,) or (N, >=19), "
-                f"got {s_goal.shape}"
-            )
-
-        if len(s_goal) != len(time):
-            raise ValueError(
-                "s_goal must have one row per state time sample"
-            )
-
         g = unpack(s_goal)
 
     # ------------------------------------------------------------
-    # Plot configuration
+    # figure
     # ------------------------------------------------------------
 
-    axis_names = ["X", "Y", "Z"]
+    axis_names = ["x", "y", "z"]
     colors = ["tab:red", "tab:green", "tab:blue"]
-    angle_names = ["Roll (phi)", "Pitch (theta)", "Yaw (psi)"]
+    angle_names = ["roll (phi)", "pitch (theta)", "yaw (psi)"]
 
-    fig, axs = plt.subplots(
-        2, 4,
-        figsize=(21, 9),
-        sharex=True,
-    )
-
+    fig, axs = plt.subplots(3, 3, figsize=(18, 12), sharex=True)
     fig.suptitle(title, fontsize=16)
 
     def format_axis(ax, plot_title, ylabel):
         ax.set_title(plot_title)
-        ax.set_xlabel("Time [s]")
         ax.set_ylabel(ylabel)
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="best", fontsize=8)
 
-    def plot_state(ax, key, labels, plot_title, ylabel):
+    def plot_three(ax, data, labels, plot_title, ylabel, goal=None):
         for i in range(3):
-            ax.plot(
-                time, d[key][:, i],
-                color=colors[i],
-                label=labels[i],
-            )
-
-            if g is not None:
-                ax.plot(
-                    time, g[key][:, i],
-                    color=colors[i],
-                    linestyle="--",
-                    alpha=0.6,
-                    label=f"{labels[i]} (goal)",
-                )
-
+            ax.plot(time, data[:, i], color=colors[i], label=labels[i])
+            if goal is not None:
+                ax.plot(time, goal[:, i], color=colors[i], linestyle="--", alpha=0.6,
+                        label=f"{labels[i]} (goal)")
         format_axis(ax, plot_title, ylabel)
 
-    def plot_control(ax, indices, labels, plot_title, ylabel):
-        for i, idx in enumerate(indices):
-            ax.step(
-                time, U_plot[:, idx],
-                where="post",
-                color=colors[i],
-                label=labels[i],
-            )
+    def limits(ax, low, high):
+        # dotted black lines at the allowed range
+        ax.axhline(low, color="k", linestyle=":", linewidth=1)
+        ax.axhline(high, color="k", linestyle=":", linewidth=1)
 
-        format_axis(ax, plot_title, ylabel)
+    # --- row 1: translation and attitude -----------------------------------
+    plot_three(axs[0, 0], d["pos"], axis_names, "Position (world)", "Position [m]",
+               g["pos"] if g else None)
+    plot_three(axs[0, 1], d["vel"], [f"v_{a}" for a in axis_names], "Velocity (world)",
+               "Velocity [m/s]", g["vel"] if g else None)
+    plot_three(axs[0, 2], d["euler"], angle_names, "Euler angles", "Angle [deg]",
+               g["euler"] if g else None)
 
-    # ------------------------------------------------------------
-    # Row 1
-    # ------------------------------------------------------------
+    # --- row 2: rotation and actuators -------------------------------------
+    plot_three(axs[1, 0], d["omega"], [f"w_{a}" for a in axis_names], "Rotation rates (body)",
+               "Rate [deg/s]", g["omega"] if g else None)
 
-    plot_state(
-        axs[0, 0], "pos", axis_names,
-        "Position", "Position [m]",
-    )
+    # solid = what the actuator produces, thin dashed = command (only drawn if it differs)
+    ax = axs[1, 1]
+    for i, (name, color) in enumerate([("delta_1 (engine 1)", "tab:orange"),
+                                       ("delta_2 (engine 2)", "tab:purple")]):
+        ax.plot(time, u_eff[:, i], color=color, label=name)
+        if not np.allclose(u_eff[:, i], u[:, i]):
+            ax.plot(time, u[:, i], color=color, linestyle="--", linewidth=1, alpha=0.7,
+                    label=f"{name.split()[0]} command")
+    limits(ax, vehicle.u_lb[0], vehicle.u_ub[0])
+    format_axis(ax, "Engine throttle (produced)", "Throttle [-]")
 
-    plot_state(
-        axs[0, 1], "vel", axis_names,
-        "Velocity", "Velocity [m/s]",
-    )
+    ax = axs[1, 2]
+    for i in range(3):
+        ax.plot(time, u_eff[:, 2 + i], color=colors[i], label=f"m_{axis_names[i]}")
+        if not np.allclose(u_eff[:, 2 + i], u[:, 2 + i]):
+            ax.plot(time, u[:, 2 + i], color=colors[i], linestyle="--", linewidth=1, alpha=0.7,
+                    label=f"m_{axis_names[i]} command")
+    limits(ax, vehicle.u_lb[2], vehicle.u_ub[2])
+    format_axis(ax, "RCS moments (produced)", "Fraction of max [-]")
 
-    plot_state(
-        axs[0, 2], "F", [f"F{a}" for a in axis_names],
-        "Forces", "Force [N]",
-    )
+    # --- row 3: forces, moments, inputs -----------------------------------
+    plot_three(axs[2, 0], F_body, [f"F_{a}" for a in axis_names],
+               "Forces from actuators (body)", "Force [kN]")
+    plot_three(axs[2, 1], M_body, [f"M_{a}" for a in axis_names],
+               "Moments from actuators (body)", "Moment [kNm]")
 
-    plot_control(
-        axs[0, 3], [0, 1, 2],
-        [f"dF{a}/dt" for a in axis_names],
-        "Force Rates (Controls)", "Force rate [N/s]",
-    )
+    ax = axs[2, 2]
+    input_names = ["delta_1", "delta_2", "m_x", "m_y", "m_z"]
+    input_colors = ["tab:orange", "tab:purple", "tab:red", "tab:green", "tab:blue"]
+    for i in range(n_u):
+        ax.step(time, U_dot[:, i], where="post", color=input_colors[i],
+                label=f"d/dt {input_names[i]}")
+    limits(ax, -vehicle.u_dot_max[0], vehicle.u_dot_max[0])   # engine rate limit
+    format_axis(ax, "Inputs u_dot (dotted: engine rate limit)", "Rate [1/s]")
 
-    # ------------------------------------------------------------
-    # Row 2
-    # ------------------------------------------------------------
+    for ax in axs[2, :]:
+        ax.set_xlabel("Time [s]")
 
-    plot_state(
-        axs[1, 0], "euler", angle_names,
-        "Euler Angles", "Angle [deg]",
-    )
-
-    plot_state(
-        axs[1, 1], "omega", [f"{a} rate" for a in axis_names],
-        "Angular Rates", "Angular rate [deg/s]",
-    )
-
-    plot_state(
-        axs[1, 2], "tau", [f"Tau {a}" for a in axis_names],
-        "Torques", "Torque [N m]",
-    )
-
-    plot_control(
-        axs[1, 3], [3, 4, 5],
-        [f"dTau{a}/dt" for a in axis_names],
-        "Torque Rates (Controls)", "Torque rate [N m/s]",
-    )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()

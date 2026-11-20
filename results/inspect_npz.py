@@ -4,11 +4,12 @@ import numpy as np
 
 # state and control conventions of the OCP (see src/vehicle.py)
 STATE_NAMES = [
-    "x", "y", "z", "u", "v", "w",
-    "qw", "qx", "qy", "qz", "p", "q", "r",
-    "Fx", "Fy", "Fz", "taux", "tauy", "tauz",
+    "x", "y", "z", "vx", "vy", "vz",
+    "qw", "qx", "qy", "qz", "wx", "wy", "wz",
+    "d1", "d2", "mx", "my", "mz",            # actuators: throttles, RCS moment commands
 ]
-CONTROL_NAMES = ["dFx", "dFy", "dFz", "dtaux", "dtauy", "dtauz"]
+CONTROL_NAMES = ["d1_dot", "d2_dot", "mx_dot", "my_dot", "mz_dot"]
+# runs from before the two-engine model (19 states) don't match these names and are printed raw
 
 
 def print_labeled(vector, names):
